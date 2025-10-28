@@ -25,6 +25,9 @@ at the end of this file.
 # pylint: disable=too-many-lines
 from __future__ import annotations
 
+import pymysql
+pymysql.install_as_MySQLdb()
+
 import importlib.util
 import json
 import logging
