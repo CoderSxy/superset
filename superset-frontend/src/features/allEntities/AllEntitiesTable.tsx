@@ -17,7 +17,8 @@
  * under the License.
  */
 import { extendedDayjs } from '@superset-ui/core/utils/dates';
-import { t, styled } from '@superset-ui/core';
+import { t } from '@apache-superset/core/translation';
+import { styled } from '@apache-superset/core/theme';
 import {
   TableView,
   EmptyWrapperType,
@@ -26,6 +27,7 @@ import { EmptyState } from '@superset-ui/core/components';
 import { FacePile, TagsList, type TagType } from 'src/components';
 import { TaggedObject, TaggedObjects } from 'src/types/TaggedObject';
 import { Typography } from '@superset-ui/core/components/Typography';
+import { ensureAppRoot } from 'src/utils/navigationUtils';
 
 const MAX_TAGS_TO_SHOW = 3;
 const PAGE_SIZE = 10;
@@ -72,7 +74,9 @@ export default function AllEntitiesTable({
 
   const renderTable = (type: objectType) => {
     const data = objects[type].map((o: TaggedObject) => ({
-      [type]: <Typography.Link href={o.url}>{o.name}</Typography.Link>,
+      [type]: (
+        <Typography.Link href={ensureAppRoot(o.url)}>{o.name}</Typography.Link>
+      ),
       modified: o.changed_on ? extendedDayjs.utc(o.changed_on).fromNow() : '',
       tags: o.tags,
       owners: o.owners,

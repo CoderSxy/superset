@@ -19,16 +19,23 @@
 import thunk from 'redux-thunk';
 import configureStore from 'redux-mock-store';
 
-import { ensureIsArray, QueryFormData } from '@superset-ui/core';
-import { GenericDataType } from '@apache-superset/core/api/core';
+import {
+  ensureIsArray,
+  QueryFormData,
+  QueryFormMetric,
+} from '@superset-ui/core';
+import { GenericDataType } from '@apache-superset/core/common';
 import { ColumnMeta } from '@superset-ui/chart-controls';
 import {
+  act,
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from 'spec/helpers/testing-library';
-import type { AsyncAceEditorProps } from '@superset-ui/core/components';
+import { useDroppable } from '@dnd-kit/core';
+import { useSortable } from '@dnd-kit/sortable';
 import AdhocMetric from 'src/explore/components/controls/MetricControl/AdhocMetric';
 import AdhocFilter from 'src/explore/components/controls/FilterControl/AdhocFilter';
 import { Operators } from 'src/explore/constants';
@@ -38,16 +45,45 @@ import {
 } from 'src/explore/components/controls/DndColumnSelectControl/DndFilterSelect';
 import { PLACEHOLDER_DATASOURCE } from 'src/dashboard/constants';
 import { ExpressionTypes } from '../FilterControl/types';
-import { Datasource } from '../../../types';
 import { DndItemType } from '../../DndItemType';
-import DatasourcePanelDragOption from '../../DatasourcePanel/DatasourcePanelDragOption';
+import { Datasource } from '../../../types';
+import {
+  CapturedDroppable,
+  CapturedSortables,
+  captureDroppableData,
+  captureSortableData,
+  simulateDrop,
+  simulateReorder,
+} from './dndTestUtils';
 
-jest.mock('@superset-ui/core/components/AsyncAceEditor', () => ({
-  ...jest.requireActual('@superset-ui/core/components/AsyncAceEditor'),
-  SQLEditor: (props: AsyncAceEditorProps) => (
-    <div data-test="react-ace">{props.value}</div>
+jest.mock('src/core/editors', () => ({
+  EditorHost: ({ value }: { value: string }) => (
+    <div data-test="react-ace">{value}</div>
   ),
 }));
+
+jest.mock('@dnd-kit/core', () => ({
+  ...jest.requireActual('@dnd-kit/core'),
+  useDroppable: jest.fn(),
+}));
+
+jest.mock('@dnd-kit/sortable', () => ({
+  ...jest.requireActual('@dnd-kit/sortable'),
+  useSortable: jest.fn(),
+}));
+
+const captured: CapturedDroppable = { current: undefined };
+const sortables: CapturedSortables = { items: [] };
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  captured.current = undefined;
+  sortables.items = [];
+  (useDroppable as jest.Mock).mockImplementation(
+    captureDroppableData(captured),
+  );
+  (useSortable as jest.Mock).mockImplementation(captureSortableData(sortables));
+});
 
 const defaultProps: Omit<DndFilterSelectProps, 'datasource'> = {
   type: 'DndFilterSelect',
@@ -67,7 +103,7 @@ const baseFormData = {
 };
 
 const mockStore = configureStore([thunk]);
-const store = mockStore({});
+const store = mockStore({ explore: {} });
 
 function setup({
   value = undefined,
@@ -94,12 +130,8 @@ function setup({
   );
 }
 
-beforeEach(() => {
-  jest.clearAllMocks();
-});
-
 test('renders with default props', async () => {
-  render(setup(), { useDnd: true, store });
+  render(setup(), { useDndKit: true, store });
   expect(
     await screen.findByText('Drop columns/metrics here or click'),
   ).toBeInTheDocument();
@@ -111,10 +143,49 @@ test('renders with value', async () => {
     expressionType: ExpressionTypes.Sql,
   });
   render(setup({ value }), {
-    useDnd: true,
+    useDndKit: true,
     store,
   });
   expect(await screen.findByText('COUNT(*)')).toBeInTheDocument();
+});
+
+test('reorder commits the new filter order to onChange', async () => {
+  // Pins the fast-drag persistence fix: onShiftOptions must both update local
+  // state AND commit to the parent. Previously it only called setValues, so the
+  // reordered order showed in the UI but was never persisted (reverted on
+  // reload). Assert the COMMITTED array, not just the rendered order.
+  const onChange = jest.fn();
+  const filterA = new AdhocFilter({
+    sqlExpression: 'expr_a',
+    expressionType: ExpressionTypes.Sql,
+  });
+  const filterB = new AdhocFilter({
+    sqlExpression: 'expr_b',
+    expressionType: ExpressionTypes.Sql,
+  });
+  const filterC = new AdhocFilter({
+    sqlExpression: 'expr_c',
+    expressionType: ExpressionTypes.Sql,
+  });
+
+  render(
+    <DndFilterSelect
+      {...defaultProps}
+      datasource={PLACEHOLDER_DATASOURCE}
+      value={[filterA, filterB, filterC]}
+      onChange={onChange}
+    />,
+    { useDndKit: true, store },
+  );
+
+  // Move the first filter to the end: a multi-index move a swap would corrupt.
+  simulateReorder(sortables, 0, 2);
+
+  expect(onChange).toHaveBeenCalledTimes(1);
+  const committed = (onChange.mock.calls[0][0] as AdhocFilter[]).map(
+    filter => filter.sqlExpression,
+  );
+  expect(committed).toEqual(['expr_b', 'expr_c', 'expr_a']);
 });
 
 test('renders options with saved metric', async () => {
@@ -126,7 +197,7 @@ test('renders options with saved metric', async () => {
       },
     }),
     {
-      useDnd: true,
+      useDndKit: true,
       store,
     },
   );
@@ -148,7 +219,7 @@ test('renders options with column', async () => {
       ],
     }),
     {
-      useDnd: true,
+      useDndKit: true,
       store,
     },
   );
@@ -166,11 +237,11 @@ test('renders options with adhoc metric', async () => {
     setup({
       formData: {
         ...baseFormData,
-        metrics: [adhocMetric],
+        metrics: [adhocMetric as unknown as QueryFormMetric],
       },
     }),
     {
-      useDnd: true,
+      useDndKit: true,
       store,
     },
   );
@@ -179,60 +250,43 @@ test('renders options with adhoc metric', async () => {
   ).toBeInTheDocument();
 });
 
-test('cannot drop a column that is not part of the simple column selection', () => {
+test('cannot drop a column that is not part of the simple column selection', async () => {
   const adhocMetric = new AdhocMetric({
     expression: 'AVG(birth_names.num)',
     metric_name: 'avg__num',
   });
-  const { getByTestId, getAllByTestId } = render(
-    <>
-      <DatasourcePanelDragOption
-        value={{ column_name: 'order_date' }}
-        type={DndItemType.Column}
-      />
-      <DatasourcePanelDragOption
-        value={{ column_name: 'address_line1' }}
-        type={DndItemType.Column}
-      />
-      <DatasourcePanelDragOption
-        value={{
-          metric_name: 'metric_a',
-          expression: 'AGG(metric_a)',
-          uuid: '1',
-        }}
-        type={DndItemType.Metric}
-      />
-      {setup({
-        formData: {
-          ...baseFormData,
-          metrics: [adhocMetric],
-        },
-        columns: [{ column_name: 'order_date' }],
-      })}
-    </>,
+  render(
+    setup({
+      formData: {
+        ...baseFormData,
+        metrics: [adhocMetric as unknown as QueryFormMetric],
+      },
+      columns: [{ column_name: 'order_date' }],
+    }),
     {
-      useDnd: true,
+      useDndKit: true,
       store,
     },
   );
 
-  const selections = getAllByTestId('DatasourcePanelDragOption');
-  const acceptableColumn = selections[0];
-  const unacceptableColumn = selections[1];
-  const metricType = selections[2];
-  const currentMetric = getByTestId('dnd-labels-container');
-
-  fireEvent.dragStart(unacceptableColumn);
-  fireEvent.dragOver(currentMetric);
-  fireEvent.drop(currentMetric);
-
+  // A column missing from the simple column selection is rejected by canDrop,
+  // so no filter popover opens.
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.Column,
+      value: { column_name: 'address_line1' } as any,
+    });
+  });
   expect(screen.queryByTestId('filter-edit-popover')).not.toBeInTheDocument();
 
-  fireEvent.dragStart(acceptableColumn);
-  fireEvent.dragOver(currentMetric);
-  fireEvent.drop(currentMetric);
-
-  const filterConfigPopup = screen.getByTestId('filter-edit-popover');
+  // An acceptable column opens the popover prefilled with that column.
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.Column,
+      value: { column_name: 'order_date' } as any,
+    });
+  });
+  const filterConfigPopup = await screen.findByTestId('filter-edit-popover');
   expect(within(filterConfigPopup).getByText('order_date')).toBeInTheDocument();
 
   fireEvent.keyDown(filterConfigPopup, {
@@ -241,15 +295,111 @@ test('cannot drop a column that is not part of the simple column selection', () 
     keyCode: 27,
     charCode: 27,
   });
+  await waitFor(() =>
+    expect(screen.queryByTestId('filter-edit-popover')).not.toBeInTheDocument(),
+  );
+
+  // A metric type is accepted (adhoc metrics are allowed here).
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.Metric,
+      value: {
+        metric_name: 'metric_a',
+        expression: 'AGG(metric_a)',
+        uuid: '1',
+      } as any,
+    });
+  });
+  const metricPopup = await screen.findByTestId('filter-edit-popover');
+  expect(within(metricPopup).getByTestId('react-ace')).toHaveTextContent(
+    'AGG(metric_a)',
+  );
+});
+
+test('when disallow_adhoc_metrics is set, can drop a column from the simple column selection', async () => {
+  const adhocMetric = new AdhocMetric({
+    expression: 'AVG(birth_names.num)',
+    metric_name: 'avg__num',
+  });
+  render(
+    setup({
+      formData: {
+        ...baseFormData,
+        metrics: [adhocMetric as unknown as QueryFormMetric],
+      },
+      datasource: {
+        ...PLACEHOLDER_DATASOURCE,
+        extra: '{ "disallow_adhoc_metrics": true }',
+      },
+      columns: [{ column_name: 'column_a' }, { column_name: 'column_b' }],
+    }),
+    {
+      useDndKit: true,
+      store,
+    },
+  );
+
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.Column,
+      value: { column_name: 'column_b' } as any,
+    });
+  });
+
+  const filterConfigPopup = await screen.findByTestId('filter-edit-popover');
+  expect(within(filterConfigPopup).getByText('column_b')).toBeInTheDocument();
+});
+
+test('when disallow_adhoc_metrics is set, cannot drop anything but a simple column selection', async () => {
+  const adhocMetric = new AdhocMetric({
+    expression: 'AVG(birth_names.num)',
+    metric_name: 'avg__num',
+  });
+  render(
+    setup({
+      formData: {
+        ...baseFormData,
+        metrics: [adhocMetric as unknown as QueryFormMetric],
+      },
+      datasource: {
+        ...PLACEHOLDER_DATASOURCE,
+        extra: '{ "disallow_adhoc_metrics": true }',
+      },
+      columns: [{ column_name: 'column_a' }, { column_name: 'column_c' }],
+    }),
+    {
+      useDndKit: true,
+      store,
+    },
+  );
+
+  // A metric is rejected when adhoc metrics are disallowed.
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.Metric,
+      value: { metric_name: 'metric_a', uuid: '1' } as any,
+    });
+  });
   expect(screen.queryByTestId('filter-edit-popover')).not.toBeInTheDocument();
 
-  fireEvent.dragStart(metricType);
-  fireEvent.dragOver(currentMetric);
-  fireEvent.drop(currentMetric);
+  // An adhoc metric option is likewise rejected.
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.AdhocMetricOption,
+      value: { metric_name: 'avg__num', uuid: '2' } as any,
+    });
+  });
+  expect(screen.queryByTestId('filter-edit-popover')).not.toBeInTheDocument();
 
-  expect(
-    within(screen.getByTestId('filter-edit-popover')).getByTestId('react-ace'),
-  ).toHaveTextContent('AGG(metric_a)');
+  // A column from the simple selection is accepted.
+  act(() => {
+    simulateDrop(captured, {
+      type: DndItemType.Column,
+      value: { column_name: 'column_c' } as any,
+    });
+  });
+  const filterConfigPopup = await screen.findByTestId('filter-edit-popover');
+  expect(within(filterConfigPopup).getByText('column_c')).toBeInTheDocument();
 });
 
 test('calls onChange when close is clicked and canDelete is true', () => {
@@ -266,7 +416,7 @@ test('calls onChange when close is clicked and canDelete is true', () => {
   const canDelete = jest.fn();
   canDelete.mockReturnValue(true);
   render(setup({ value: [value1, value2], additionalProps: { canDelete } }), {
-    useDnd: true,
+    useDndKit: true,
     store,
   });
   fireEvent.click(screen.getAllByTestId('remove-control-button')[0]);
@@ -288,7 +438,7 @@ test('onChange is not called when close is clicked and canDelete is false', () =
   const canDelete = jest.fn();
   canDelete.mockReturnValue(false);
   render(setup({ value: [value1, value2], additionalProps: { canDelete } }), {
-    useDnd: true,
+    useDndKit: true,
     store,
   });
   fireEvent.click(screen.getAllByTestId('remove-control-button')[0]);
@@ -310,117 +460,11 @@ test('onChange is not called when close is clicked and canDelete is string, warn
   const canDelete = jest.fn();
   canDelete.mockReturnValue('Test warning');
   render(setup({ value: [value1, value2], additionalProps: { canDelete } }), {
-    useDnd: true,
+    useDndKit: true,
     store,
   });
   fireEvent.click(screen.getAllByTestId('remove-control-button')[0]);
   expect(canDelete).toHaveBeenCalled();
   expect(defaultProps.onChange).not.toHaveBeenCalled();
   expect(await screen.findByText('Test warning')).toBeInTheDocument();
-});
-
-// eslint-disable-next-line no-restricted-globals -- TODO: Migrate from describe blocks
-describe('when disallow_adhoc_metrics is set', () => {
-  test('can drop a column type from the simple column selection', () => {
-    const adhocMetric = new AdhocMetric({
-      expression: 'AVG(birth_names.num)',
-      metric_name: 'avg__num',
-    });
-    const { getByTestId } = render(
-      <>
-        <DatasourcePanelDragOption
-          value={{ column_name: 'column_b' }}
-          type={DndItemType.Column}
-        />
-        {setup({
-          formData: {
-            ...baseFormData,
-            metrics: [adhocMetric],
-          },
-          datasource: {
-            ...PLACEHOLDER_DATASOURCE,
-            extra: '{ "disallow_adhoc_metrics": true }',
-          },
-          columns: [{ column_name: 'column_a' }, { column_name: 'column_b' }],
-        })}
-      </>,
-      {
-        useDnd: true,
-        store,
-      },
-    );
-
-    const acceptableColumn = getByTestId('DatasourcePanelDragOption');
-    const currentMetric = getByTestId('dnd-labels-container');
-
-    fireEvent.dragStart(acceptableColumn);
-    fireEvent.dragOver(currentMetric);
-    fireEvent.drop(currentMetric);
-
-    const filterConfigPopup = screen.getByTestId('filter-edit-popover');
-    expect(within(filterConfigPopup).getByText('column_b')).toBeInTheDocument();
-  });
-
-  test('cannot drop any other types of selections apart from simple column selection', () => {
-    const adhocMetric = new AdhocMetric({
-      expression: 'AVG(birth_names.num)',
-      metric_name: 'avg__num',
-    });
-    const { getByTestId, getAllByTestId } = render(
-      <>
-        <DatasourcePanelDragOption
-          value={{ column_name: 'column_c' }}
-          type={DndItemType.Column}
-        />
-        <DatasourcePanelDragOption
-          value={{ metric_name: 'metric_a', uuid: '1' }}
-          type={DndItemType.Metric}
-        />
-        <DatasourcePanelDragOption
-          value={{ metric_name: 'avg__num', uuid: '2' }}
-          type={DndItemType.AdhocMetricOption}
-        />
-        {setup({
-          formData: {
-            ...baseFormData,
-            metrics: [adhocMetric],
-          },
-          datasource: {
-            ...PLACEHOLDER_DATASOURCE,
-            extra: '{ "disallow_adhoc_metrics": true }',
-          },
-          columns: [{ column_name: 'column_a' }, { column_name: 'column_c' }],
-        })}
-      </>,
-      {
-        useDnd: true,
-        store,
-      },
-    );
-
-    const selections = getAllByTestId('DatasourcePanelDragOption');
-    const acceptableColumn = selections[0];
-    const unacceptableMetric = selections[1];
-    const unacceptableType = selections[2];
-    const currentMetric = getByTestId('dnd-labels-container');
-
-    fireEvent.dragStart(unacceptableMetric);
-    fireEvent.dragOver(currentMetric);
-    fireEvent.drop(currentMetric);
-
-    expect(screen.queryByTestId('filter-edit-popover')).not.toBeInTheDocument();
-
-    fireEvent.dragStart(unacceptableType);
-    fireEvent.dragOver(currentMetric);
-    fireEvent.drop(currentMetric);
-
-    expect(screen.queryByTestId('filter-edit-popover')).not.toBeInTheDocument();
-
-    fireEvent.dragStart(acceptableColumn);
-    fireEvent.dragOver(currentMetric);
-    fireEvent.drop(currentMetric);
-
-    const filterConfigPopup = screen.getByTestId('filter-edit-popover');
-    expect(within(filterConfigPopup).getByText('column_c')).toBeInTheDocument();
-  });
 });

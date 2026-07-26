@@ -20,9 +20,10 @@
 import fetchMock from 'fetch-mock';
 import { render } from 'spec/helpers/testing-library';
 import { Provider } from 'react-redux';
-import { MemoryRouter } from 'react-router-dom';
+import { BrowserRouter } from 'react-router-dom';
 import { configureStore } from '@reduxjs/toolkit';
 import { QueryParamProvider } from 'use-query-params';
+import { ReactRouter5Adapter } from 'use-query-params/adapters/react-router-5';
 import ChartList from 'src/pages/ChartList';
 import handleResourceExport from 'src/utils/export';
 
@@ -32,7 +33,7 @@ export const mockHandleResourceExport =
 export const mockCharts = [
   {
     id: 0,
-    url: '/superset/slice/0/',
+    url: '/explore/?slice_id=0',
     viz_type: 'table',
     slice_name: 'Test Chart 0',
 
@@ -42,7 +43,7 @@ export const mockCharts = [
     tags: [{ name: 'basic', type: 1, id: 1 }],
 
     datasource_name_text: 'public.test_dataset',
-    datasource_url: '/superset/explore/table/1/',
+    datasource_url: '/explore/?datasource_type=table&datasource_id=1',
     datasource_id: 1,
 
     changed_by_name: 'user',
@@ -60,10 +61,18 @@ export const mockCharts = [
     thumbnail_url: '/api/v1/chart/0/thumbnail/',
     certified_by: null,
     certification_details: null,
+
+    // Add form_data with matrixify enabled
+    form_data: {
+      viz_type: 'table',
+      matrixify_enable: true,
+      matrixify_mode_rows: 'metrics',
+      matrixify_rows: [{ label: 'COUNT(*)', expressionType: 'SIMPLE' }],
+    },
   },
   {
     id: 1,
-    url: '/superset/slice/1/',
+    url: '/explore/?slice_id=1',
     viz_type: 'bar',
     slice_name: 'Test Chart 1',
 
@@ -84,7 +93,7 @@ export const mockCharts = [
     ],
 
     datasource_name_text: 'sales_data',
-    datasource_url: '/superset/explore/table/2/',
+    datasource_url: '/explore/?datasource_type=table&datasource_id=2',
     datasource_id: 2,
 
     changed_by_name: 'admin',
@@ -102,10 +111,15 @@ export const mockCharts = [
     thumbnail_url: '/api/v1/chart/1/thumbnail/',
     certified_by: 'Data Team',
     certification_details: 'Approved for production use',
+
+    // Add form_data without matrixify
+    form_data: {
+      viz_type: 'bar',
+    },
   },
   {
     id: 2,
-    url: '/superset/slice/2/',
+    url: '/explore/?slice_id=2',
     viz_type: 'line',
     slice_name: 'Test Chart 2',
 
@@ -136,7 +150,7 @@ export const mockCharts = [
   },
   {
     id: 3,
-    url: '/superset/slice/3/',
+    url: '/explore/?slice_id=3',
     viz_type: 'area',
     slice_name: 'Test Chart 3',
 
@@ -154,7 +168,7 @@ export const mockCharts = [
     tags: [{ name: 'limit-test', type: 1, id: 10 }],
 
     datasource_name_text: 'public.limits_dataset',
-    datasource_url: '/superset/explore/table/4/',
+    datasource_url: '/explore/?datasource_type=table&datasource_id=4',
     datasource_id: 4,
 
     changed_by_name: 'limit_user',
@@ -175,7 +189,7 @@ export const mockCharts = [
   },
   {
     id: 4,
-    url: '/superset/slice/4/',
+    url: '/explore/?slice_id=4',
     viz_type: 'bubble',
     slice_name: 'Test Chart 4',
 
@@ -194,7 +208,7 @@ export const mockCharts = [
     tags: [{ name: 'overflow', type: 1, id: 11 }],
 
     datasource_name_text: 'public.overflow_dataset',
-    datasource_url: '/superset/explore/table/5/',
+    datasource_url: '/explore/?datasource_type=table&datasource_id=5',
     datasource_id: 5,
 
     changed_by_name: 'overflow_user',
@@ -255,11 +269,11 @@ export const renderChartList = (user: any, props = {}, storeState = {}) => {
 
   return render(
     <Provider store={store}>
-      <MemoryRouter>
-        <QueryParamProvider>
+      <BrowserRouter>
+        <QueryParamProvider adapter={ReactRouter5Adapter}>
           <ChartList user={user} {...props} />
         </QueryParamProvider>
-      </MemoryRouter>
+      </BrowserRouter>
     </Provider>,
   );
 };
@@ -278,17 +292,27 @@ export const API_ENDPOINTS = {
   CATCH_ALL: 'glob:*',
 };
 
-export const setupMocks = () => {
-  fetchMock.reset();
+export const setupMocks = (
+  payloadMap = {
+    [API_ENDPOINTS.CHARTS_INFO]: ['can_read', 'can_write', 'can_export'],
+  },
+) => {
+  fetchMock.get(
+    API_ENDPOINTS.CHARTS_INFO,
+    {
+      permissions: payloadMap[API_ENDPOINTS.CHARTS_INFO],
+    },
+    { name: API_ENDPOINTS.CHARTS_INFO },
+  );
 
-  fetchMock.get(API_ENDPOINTS.CHARTS_INFO, {
-    permissions: ['can_read', 'can_write', 'can_export'],
-  });
-
-  fetchMock.get(API_ENDPOINTS.CHARTS, {
-    result: mockCharts,
-    chart_count: mockCharts.length,
-  });
+  fetchMock.get(
+    API_ENDPOINTS.CHARTS,
+    {
+      result: mockCharts,
+      chart_count: mockCharts.length,
+    },
+    { name: API_ENDPOINTS.CHARTS },
+  );
 
   fetchMock.get(API_ENDPOINTS.CHART_FAVORITE_STATUS, {
     result: [],

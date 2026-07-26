@@ -22,24 +22,23 @@ import {
   KeyboardEvent,
   useState,
   useRef,
+  useEffect,
   RefObject,
 } from 'react';
 
 import { RouteComponentProps, useHistory } from 'react-router-dom';
 import { extendedDayjs } from '@superset-ui/core/utils/dates';
+import { t } from '@apache-superset/core/translation';
 import {
   Behavior,
-  css,
   isFeatureEnabled,
   FeatureFlag,
-  useTheme,
   getChartMetadataRegistry,
-  styled,
-  t,
   VizType,
   BinaryQueryObjectFilterClause,
   QueryFormData,
 } from '@superset-ui/core';
+import { css, useTheme, styled } from '@apache-superset/core/theme';
 import { useSelector } from 'react-redux';
 import { Menu, MenuItem } from '@superset-ui/core/components/Menu';
 import {
@@ -58,11 +57,14 @@ import { useDrillDetailMenuItems } from 'src/components/Chart/useDrillDetailMenu
 import { LOG_ACTIONS_CHART_DOWNLOAD_AS_IMAGE } from 'src/logger/LogUtils';
 import { MenuKeys, RootState } from 'src/dashboard/types';
 import DrillDetailModal from 'src/components/Chart/DrillDetail/DrillDetailModal';
+import { openInNewTab } from 'src/utils/navigationUtils';
 import { usePermissions } from 'src/hooks/usePermissions';
 import { useDatasetDrillInfo } from 'src/hooks/apiResources/datasets';
 import { ResourceStatus } from 'src/hooks/apiResources/apiResources';
 import { useCrossFiltersScopingModal } from '../nativeFilters/FilterBar/CrossFilters/ScopingModal/useCrossFiltersScopingModal';
 import { ViewResultsModalTrigger } from './ViewResultsModalTrigger';
+import { Global } from '@emotion/react';
+import { fullscreenStyles } from './Styles';
 
 const RefreshTooltip = styled.div`
   ${({ theme }) => css`
@@ -98,6 +100,7 @@ const VerticalDotsTrigger = () => {
 };
 
 export interface SliceHeaderControlsProps {
+  chartHolderRef?: RefObject<HTMLDivElement>;
   slice: {
     description: string;
     viz_type: string;
@@ -113,6 +116,7 @@ export interface SliceHeaderControlsProps {
   chartStatus: string;
   isCached: boolean[];
   cachedDttm: string[] | null;
+  queriedDttm?: string | null;
   isExpanded?: boolean;
   updatedDttm: number | null;
   isFullSize?: boolean;
@@ -145,11 +149,17 @@ type SliceHeaderControlsPropsWithRouter = SliceHeaderControlsProps &
   RouteComponentProps;
 
 const dropdownIconsStyles = css`
-  &&.anticon > .anticon:first-child {
+  &&.anticon > .anticon:first-of-type {
     margin-right: 0;
     vertical-align: 0;
   }
 `;
+
+const queueChartResize = () => {
+  window.setTimeout(() => {
+    window.dispatchEvent(new Event('resize'));
+  }, 300);
+};
 
 const SliceHeaderControls = (
   props: SliceHeaderControlsPropsWithRouter | SliceHeaderControlsProps,
@@ -198,6 +208,41 @@ const SliceHeaderControls = (
     }
   };
 
+  const requestChartFullscreen = () => {
+    const chartHolder = props.chartHolderRef?.current;
+
+    if (!chartHolder?.requestFullscreen) {
+      props.addDangerToast(t('Fullscreen is not supported in this browser.'));
+      return;
+    }
+
+    chartHolder.requestFullscreen().catch(error => {
+      props.addDangerToast(
+        t(
+          'Error enabling fullscreen: %s',
+          error instanceof Error ? error.message : t('Unknown error'),
+        ),
+      );
+    });
+  };
+
+  const exitChartFullscreen = () => {
+    if (!document.exitFullscreen) {
+      props.handleToggleFullSize();
+      queueChartResize();
+      return;
+    }
+
+    document.exitFullscreen().catch(error => {
+      props.addDangerToast(
+        t(
+          'Error disabling fullscreen: %s',
+          error instanceof Error ? error.message : t('Unknown error'),
+        ),
+      );
+    });
+  };
+
   const handleMenuClick = ({
     key,
     domEvent,
@@ -219,7 +264,7 @@ const SliceHeaderControls = (
         props.logExploreChart?.(props.slice.slice_id);
         if (domEvent.metaKey || domEvent.ctrlKey) {
           domEvent.preventDefault();
-          window.open(props.exploreUrl, '_blank');
+          openInNewTab(props.exploreUrl);
         } else {
           history.push(props.exploreUrl);
         }
@@ -232,9 +277,19 @@ const SliceHeaderControls = (
         // eslint-disable-next-line no-unused-expressions
         props.exportPivotCSV?.(props.slice.slice_id);
         break;
-      case MenuKeys.Fullscreen:
-        props.handleToggleFullSize();
+      case MenuKeys.Fullscreen: {
+        if (props.isFullSize) {
+          if (document.fullscreenElement) {
+            exitChartFullscreen();
+          } else {
+            props.handleToggleFullSize();
+            queueChartResize();
+          }
+        } else {
+          requestChartFullscreen();
+        }
         break;
+      }
       case MenuKeys.ExportFullCsv:
         // eslint-disable-next-line no-unused-expressions
         props.exportFullCSV?.(props.slice.slice_id);
@@ -311,6 +366,7 @@ const SliceHeaderControls = (
     slice,
     isFullSize,
     cachedDttm = [],
+    queriedDttm = null,
     updatedDttm = null,
     addSuccessToast = () => {},
     addDangerToast = () => {},
@@ -320,22 +376,29 @@ const SliceHeaderControls = (
   const isTable = slice.viz_type === VizType.Table;
   const isPivotTable = slice.viz_type === VizType.PivotTable;
   const cachedWhen = (cachedDttm || []).map(itemCachedDttm =>
-    extendedDayjs.utc(itemCachedDttm).fromNow(),
+    (extendedDayjs.utc(itemCachedDttm) as any).fromNow(),
   );
   const updatedWhen = updatedDttm
-    ? extendedDayjs.utc(updatedDttm).fromNow()
+    ? (extendedDayjs.utc(updatedDttm) as any).fromNow()
     : '';
-  const getCachedTitle = (itemCached: boolean) => {
+  const getCachedTitle = (itemCached: boolean, index: number) => {
     if (itemCached) {
-      return t('Cached %s', cachedWhen);
+      return t('Cached %s', cachedWhen[index]);
     }
     if (updatedWhen) {
       return t('Fetched %s', updatedWhen);
     }
     return '';
   };
-  const refreshTooltipData = [...new Set(isCached.map(getCachedTitle) || '')];
-  // If all queries have same cache time we can unit them to one
+  const refreshTooltipData = (() => {
+    const titles = isCached.map((itemCached, index) =>
+      getCachedTitle(itemCached, index),
+    );
+    // Collapse to a single entry only when every query shares the same
+    // cache/fetch time; otherwise keep the per-query list so the "Query N"
+    // numbering stays aligned with the original query order.
+    return new Set(titles).size === 1 ? [titles[0]] : titles;
+  })();
   const refreshTooltip = refreshTooltipData.map((item, index) => (
     <div key={`tooltip-${index}`}>
       {refreshTooltipData.length > 1
@@ -343,13 +406,17 @@ const SliceHeaderControls = (
         : item}
     </div>
   ));
+
+  const queriedLabel = queriedDttm
+    ? extendedDayjs.utc(queriedDttm).local().format('L LTS')
+    : null;
   const fullscreenLabel = isFullSize
     ? t('Exit fullscreen')
     : t('Enter fullscreen');
 
-  // @z-index-below-dashboard-header (100) - 1 = 99 for !isFullSize and 101 for isFullSize
+  // Use theme.zIndexPopupBase to keep dropdown above fullscreen (+1) or below dashboard header (-1)
   const dropdownOverlayStyle = {
-    zIndex: isFullSize ? 101 : 99,
+    zIndex: isFullSize ? theme.zIndexPopupBase + 1 : theme.zIndexPopupBase - 1,
     animationDuration: '0s',
   };
 
@@ -357,17 +424,22 @@ const SliceHeaderControls = (
     {
       key: MenuKeys.ForceRefresh,
       label: (
-        <>
-          {t('Force refresh')}
-          <RefreshTooltip data-test="dashboard-slice-refresh-tooltip">
-            {refreshTooltip}
-          </RefreshTooltip>
-        </>
+        <Tooltip
+          title={queriedLabel ? `${t('Last queried at')}: ${queriedLabel}` : ''}
+          overlayStyle={{ maxWidth: 'none' }}
+        >
+          <div>
+            {t('Force refresh')}
+            <RefreshTooltip data-test="dashboard-slice-refresh-tooltip">
+              {refreshTooltip}
+            </RefreshTooltip>
+          </div>
+        </Tooltip>
       ),
       disabled: props.chartStatus === 'loading',
       style: { height: 'auto', lineHeight: 'initial' },
-      ...{ 'data-test': 'refresh-chart-menu-item' }, // Typescript hack to get around MenuItem type
-    },
+      'data-test': 'refresh-chart-menu-item', // Typescript hack to get around MenuItem type
+    } as any,
     {
       key: MenuKeys.Fullscreen,
       label: fullscreenLabel,
@@ -394,8 +466,8 @@ const SliceHeaderControls = (
           {t('Edit chart')}
         </Tooltip>
       ),
-      ...{ 'data-test-edit-chart-name': slice.slice_name },
-    });
+      'data-test-edit-chart-name': slice.slice_name,
+    } as any);
   }
 
   if (canEditCrossFilters) {
@@ -448,6 +520,7 @@ const SliceHeaderControls = (
               isRequest
               isVisible
               canDownload={!!props.supersetCanCSV}
+              columnDisplayNames={datasetWithVerboseMap?.verbose_map}
             />
           }
         />
@@ -473,6 +546,8 @@ const SliceHeaderControls = (
     addSuccessToast,
     addDangerToast,
     title: t('Share'),
+    latestQueryFormData: props.formData,
+    maxWidth: `${theme.sizeUnit * 100}px`,
   });
 
   if (isFeatureEnabled(FeatureFlag.DrillToDetail) && canDrillToDetail) {
@@ -542,13 +617,35 @@ const SliceHeaderControls = (
     });
   }
 
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isChartFullscreen =
+        document.fullscreenElement === props.chartHolderRef?.current;
+
+      if (isChartFullscreen !== Boolean(isFullSize)) {
+        props.handleToggleFullSize();
+        queueChartResize();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, [isFullSize, props.chartHolderRef, props.handleToggleFullSize]);
+
   return (
     <>
       {isFullSize && (
         <Icons.FullscreenExitOutlined
           style={{ fontSize: 22 }}
           onClick={() => {
-            props.handleToggleFullSize();
+            if (document.fullscreenElement) {
+              exitChartFullscreen();
+            } else {
+              props.handleToggleFullSize();
+              queueChartResize();
+            }
           }}
         />
       )}
@@ -571,11 +668,13 @@ const SliceHeaderControls = (
         <Button
           id={`slice_${slice.slice_id}-controls`}
           buttonStyle="link"
-          aria-label="More Options"
+          aria-label={t('More Options')}
           aria-haspopup="true"
           css={theme => css`
-            padding: ${theme.sizeUnit * 2}px;
-            padding-right: 0px;
+            width: ${theme.sizeUnit * 8}px;
+            height: ${theme.sizeUnit * 8}px;
+            padding: 0;
+            margin-right: -${theme.sizeUnit * 2}px;
           `}
         >
           <VerticalDotsTrigger />
@@ -591,8 +690,8 @@ const SliceHeaderControls = (
         showModal={drillModalIsOpen}
         dataset={datasetWithVerboseMap}
       />
-
       {canEditCrossFilters && scopingModal}
+      {isFullSize && <Global styles={fullscreenStyles(theme)} />}
     </>
   );
 };

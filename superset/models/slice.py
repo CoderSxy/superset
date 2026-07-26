@@ -21,6 +21,7 @@ from typing import Any, TYPE_CHECKING
 from urllib import parse
 
 import sqlalchemy as sqla
+from flask import current_app, has_request_context, url_for
 from flask_appbuilder import Model
 from flask_appbuilder.models.decorators import renders
 from markupsafe import escape, Markup
@@ -38,6 +39,7 @@ from sqlalchemy.engine.base import Connection
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm.mapper import Mapper
 from sqlalchemy.sql.elements import BinaryExpression
+from superset_core.common.models import Chart as CoreChart
 
 from superset import db, is_feature_enabled, security_manager
 from superset.legacy import update_time_range
@@ -57,15 +59,24 @@ metadata = Model.metadata  # pylint: disable=no-member
 slice_user = Table(
     "slice_user",
     metadata,
-    Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("ab_user.id", ondelete="CASCADE")),
-    Column("slice_id", Integer, ForeignKey("slices.id", ondelete="CASCADE")),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("ab_user.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "slice_id",
+        Integer,
+        ForeignKey("slices.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
 )
 logger = logging.getLogger(__name__)
 
 
 class Slice(  # pylint: disable=too-many-public-methods
-    Model, AuditMixinNullable, ImportExportMixin
+    CoreChart, AuditMixinNullable, ImportExportMixin
 ):
     """A slice is essentially a report or a view on data"""
 
@@ -141,15 +152,8 @@ class Slice(  # pylint: disable=too-many-public-methods
         return self.slice_name or str(self.id)
 
     @property
-    def cls_model(self) -> type[SqlaTable]:
-        # pylint: disable=import-outside-toplevel
-        from superset.daos.datasource import DatasourceDAO
-
-        return DatasourceDAO.sources[self.datasource_type]
-
-    @property
     def datasource(self) -> SqlaTable | None:
-        return self.get_datasource
+        return self.table
 
     def clone(self) -> Slice:
         return Slice(
@@ -163,15 +167,6 @@ class Slice(  # pylint: disable=too-many-public-methods
             cache_timeout=self.cache_timeout,
         )
 
-    # pylint: disable=using-constant-test
-    @datasource.getter  # type: ignore
-    def get_datasource(self) -> SqlaTable | None:
-        return (
-            db.session.query(self.cls_model)
-            .filter_by(id=self.datasource_id)
-            .one_or_none()
-        )
-
     @renders("datasource_name")
     def datasource_link(self) -> Markup | None:
         datasource = self.datasource
@@ -179,10 +174,13 @@ class Slice(  # pylint: disable=too-many-public-methods
 
     @renders("datasource_url")
     def datasource_url(self) -> str | None:
+        # Use getattr to guard against datasource types that don't have explore_url
+        # (e.g. Query objects), which would otherwise raise AttributeError and cause
+        # the entire chart list response to fail.
         if self.table:
-            return self.table.explore_url
+            return getattr(self.table, "explore_url", None)
         datasource = self.datasource
-        return datasource.explore_url if datasource else None
+        return getattr(datasource, "explore_url", None) if datasource else None
 
     def datasource_name_text(self) -> str | None:
         if self.table:
@@ -200,8 +198,6 @@ class Slice(  # pylint: disable=too-many-public-methods
         datasource = self.datasource
         return datasource.url if datasource else None
 
-    # pylint: enable=using-constant-test
-
     @property
     def viz(self) -> BaseViz | None:
         form_data = json.loads(self.params)
@@ -213,7 +209,7 @@ class Slice(  # pylint: disable=too-many-public-methods
 
     @property
     def description_markeddown(self) -> str:
-        return utils.markdown(self.description)
+        return utils.markdown(self.description or "")
 
     @property
     def data(self) -> dict[str, Any]:
@@ -239,6 +235,11 @@ class Slice(  # pylint: disable=too-many-public-methods
             "query_context": self.query_context,
             "modified": self.modified(),
             "owners": [owner.id for owner in self.owners],
+            "extra_owners": (
+                [u["id"] for u in resolver(self)]
+                if (resolver := current_app.config.get("EXTRA_OWNERS_RESOLVER"))
+                else []
+            ),
             "slice_id": self.id,
             "slice_name": self.slice_name,
             "slice_url": self.slice_url,
@@ -258,7 +259,14 @@ class Slice(  # pylint: disable=too-many-public-methods
         if the dashboard has changed
         """
         if digest := self.digest:
-            return f"/api/v1/chart/{self.id}/thumbnail/{digest}/"
+            if not has_request_context():
+                # Out-of-request callers (CLI, celery tasks) have no
+                # SCRIPT_NAME to honor; keep the router-relative shape so
+                # the property stays callable anywhere.
+                return f"/api/v1/chart/{self.id}/thumbnail/{digest}/"
+            # url_for respects SCRIPT_NAME, so the URL carries the application
+            # root prefix under subdirectory deployments.
+            return url_for("ChartRestApi.thumbnail", pk=self.id, digest=digest)
 
         return None
 
@@ -291,7 +299,7 @@ class Slice(  # pylint: disable=too-many-public-methods
         if self.query_context:
             try:
                 return self.get_query_context_factory().create(
-                    **json.loads(self.query_context)
+                    **{**json.loads(self.query_context), "current_slice": self}
                 )
             except json.JSONDecodeError as ex:
                 logger.error("Malformed json in slice's query context", exc_info=True)
@@ -323,7 +331,7 @@ class Slice(  # pylint: disable=too-many-public-methods
     @property
     def explore_json_url(self) -> str:
         """Defines the url to access the slice"""
-        return self.get_explore_url("/superset/explore_json")
+        return self.get_explore_url("/explore_json")
 
     @property
     def edit_url(self) -> str:
@@ -336,15 +344,23 @@ class Slice(  # pylint: disable=too-many-public-methods
     @property
     def slice_link(self) -> Markup:
         name = escape(self.chart)
-        return Markup(f'<a href="{self.url}">{name}</a>')
+        # FAB list view renders this raw HTML; use url_for so Flask prepends
+        # SCRIPT_NAME (the application_root). `Slice.url` itself stays router-
+        # relative so frontend callers can apply ensureAppRoot exactly once.
+        href = url_for("ExploreView.root", slice_id=self.id)
+        return Markup(f'<a href="{href}">{name}</a>')
 
     @property
     def icons(self) -> str:
+        # Escape the data-controlled datasource name and edit URL before they
+        # are interpolated into HTML attributes.
+        url = escape(self.datasource_edit_url)
+        datasource = escape(self.datasource)
         return f"""
         <a
-                href="{self.datasource_edit_url}"
+                href="{url}"
                 data-toggle="tooltip"
-                title="{self.datasource}">
+                title="{datasource}">
             <i class="fa fa-database"></i>
         </a>
         """
@@ -376,7 +392,10 @@ def id_or_uuid_filter(id_or_uuid: str | int) -> BinaryExpression:
 
 
 def set_related_perm(_mapper: Mapper, _connection: Connection, target: Slice) -> None:
-    src_class = target.cls_model
+    # pylint: disable=import-outside-toplevel
+    from superset.daos.datasource import DatasourceDAO
+
+    src_class = DatasourceDAO.sources[target.datasource_type]
     if id_ := target.datasource_id:
         ds = db.session.query(src_class).filter_by(id=int(id_)).first()
         if ds:

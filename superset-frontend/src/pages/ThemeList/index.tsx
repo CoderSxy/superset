@@ -17,14 +17,16 @@
  * under the License.
  */
 
-import { useCallback, useMemo, useState } from 'react';
-import { t, SupersetClient, styled } from '@superset-ui/core';
+import { useCallback, useMemo, useState, useEffect } from 'react';
+import { t } from '@apache-superset/core/translation';
+import { SupersetClient } from '@superset-ui/core';
+import { Alert } from '@apache-superset/core/components';
+import { styled } from '@apache-superset/core/theme';
 import {
   Tag,
   DeleteModal,
   ConfirmStatusChange,
   Loading,
-  Alert,
   Tooltip,
   Space,
 } from '@superset-ui/core/components';
@@ -110,14 +112,26 @@ function ThemesList({
     refreshData,
     toggleBulkSelect,
   } = useListViewResource<ThemeObject>('theme', t('Themes'), addDangerToast);
-  const { setTemporaryTheme, getCurrentCrudThemeId } = useThemeContext();
+  const { setTemporaryTheme, hasDevOverride, getAppliedThemeId } =
+    useThemeContext();
   const [themeModalOpen, setThemeModalOpen] = useState<boolean>(false);
   const [currentTheme, setCurrentTheme] = useState<ThemeObject | null>(null);
   const [preparingExport, setPreparingExport] = useState<boolean>(false);
   const [importingTheme, showImportModal] = useState<boolean>(false);
-  const [appliedThemeId, setAppliedThemeId] = useState<number | null>(null);
+  const [appliedThemeId, setLocalAppliedThemeId] = useState<number | null>(
+    null,
+  );
 
   const { showConfirm, ConfirmModal } = useConfirmModal();
+
+  useEffect(() => {
+    if (hasDevOverride()) {
+      const storedThemeId = getAppliedThemeId();
+      setLocalAppliedThemeId(storedThemeId);
+    } else {
+      setLocalAppliedThemeId(null);
+    }
+  }, [hasDevOverride, getAppliedThemeId]);
 
   const canCreate = hasPerm('can_write');
   const canEdit = hasPerm('can_write');
@@ -201,8 +215,11 @@ function ThemesList({
       if (themeObj.json_data) {
         try {
           const themeConfig = JSON.parse(themeObj.json_data);
-          setTemporaryTheme(themeConfig);
-          setAppliedThemeId(themeObj.id || null);
+          const themeId = themeObj.id || null;
+
+          setTemporaryTheme(themeConfig, themeId);
+          setLocalAppliedThemeId(themeId);
+
           addSuccessToast(t('Local theme set to "%s"', themeObj.theme_name));
         } catch (error) {
           addDangerToast(
@@ -217,23 +234,26 @@ function ThemesList({
   function handleThemeModalApply() {
     // Clear any previously applied theme ID when applying from modal
     // since the modal theme might not have an ID yet (unsaved theme)
-    setAppliedThemeId(null);
+    setLocalAppliedThemeId(null);
   }
 
-  const handleBulkThemeExport = async (themesToExport: ThemeObject[]) => {
-    const ids = themesToExport
-      .map(({ id }) => id)
-      .filter((id): id is number => id !== undefined);
-    setPreparingExport(true);
-    try {
-      await handleResourceExport('theme', ids, () => {
+  const handleBulkThemeExport = useCallback(
+    async (themesToExport: ThemeObject[]) => {
+      const ids = themesToExport
+        .map(({ id }) => id)
+        .filter((id): id is number => id !== undefined);
+      setPreparingExport(true);
+      try {
+        await handleResourceExport('theme', ids, () => {
+          setPreparingExport(false);
+        });
+      } catch (error) {
         setPreparingExport(false);
-      });
-    } catch (error) {
-      setPreparingExport(false);
-      addDangerToast(t('There was an issue exporting the selected themes'));
-    }
-  };
+        addDangerToast(t('There was an issue exporting the selected themes'));
+      }
+    },
+    [addDangerToast],
+  );
 
   const openThemeImportModal = () => {
     showImportModal(true);
@@ -346,11 +366,10 @@ function ThemesList({
     () => [
       {
         Cell: ({ row: { original } }: any) => {
-          const currentCrudThemeId = getCurrentCrudThemeId();
           const isCurrentTheme =
-            (currentCrudThemeId &&
-              original.id?.toString() === currentCrudThemeId) ||
-            (appliedThemeId && original.id === appliedThemeId);
+            hasDevOverride() &&
+            appliedThemeId &&
+            original.id === appliedThemeId;
 
           return (
             <FlexRowContainer>
@@ -368,14 +387,14 @@ function ThemesList({
                 </Tooltip>
               )}
               {original.is_system_default && (
-                <Tooltip title={t('This is the system default theme')}>
+                <Tooltip title={t('This is the default light theme')}>
                   <IconTag color="warning" icon={<Icons.SunOutlined />}>
                     {t('Default')}
                   </IconTag>
                 </Tooltip>
               )}
               {original.is_system_dark && (
-                <Tooltip title={t('This is the system dark theme')}>
+                <Tooltip title={t('This is the default dark theme')}>
                   <IconTag color="default" icon={<Icons.MoonOutlined />}>
                     {t('Dark')}
                   </IconTag>
@@ -421,32 +440,28 @@ function ThemesList({
           const handleExport = () => handleBulkThemeExport([original]);
 
           const actions = [
-            canApply
-              ? {
-                  label: 'apply-action',
-                  tooltip: t(
-                    'Set local theme. Will be applied to your session until unset.',
-                  ),
-                  placement: 'bottom',
-                  icon: 'ThunderboltOutlined',
-                  onClick: handleApply,
-                }
-              : null,
             canEdit
               ? {
                   label: 'edit-action',
-                  tooltip: original.is_system
-                    ? t('View theme')
-                    : t('Edit theme'),
+                  tooltip: original.is_system ? t('View') : t('Edit'),
                   placement: 'bottom',
                   icon: original.is_system ? 'EyeOutlined' : 'EditOutlined',
                   onClick: handleEdit,
                 }
               : null,
+            canApply
+              ? {
+                  label: 'apply-action',
+                  tooltip: t('Set local theme for testing'),
+                  placement: 'bottom',
+                  icon: 'ThunderboltOutlined',
+                  onClick: handleApply,
+                }
+              : null,
             canExport
               ? {
                   label: 'export-action',
-                  tooltip: t('Export theme'),
+                  tooltip: t('Export'),
                   placement: 'bottom',
                   icon: 'UploadOutlined',
                   onClick: handleExport,
@@ -455,7 +470,7 @@ function ThemesList({
             canSetSystemThemes && !original.is_system_default
               ? {
                   label: 'set-default-action',
-                  tooltip: t('Set as system default theme'),
+                  tooltip: t('Set as default light theme'),
                   placement: 'bottom',
                   icon: 'SunOutlined',
                   onClick: () => handleSetSystemDefault(original),
@@ -464,7 +479,7 @@ function ThemesList({
             canSetSystemThemes && original.is_system_default
               ? {
                   label: 'unset-default-action',
-                  tooltip: t('Remove as system default theme'),
+                  tooltip: t('Clear default light theme'),
                   placement: 'bottom',
                   icon: 'StopOutlined',
                   onClick: () => handleUnsetSystemDefault(),
@@ -473,7 +488,7 @@ function ThemesList({
             canSetSystemThemes && !original.is_system_dark
               ? {
                   label: 'set-dark-action',
-                  tooltip: t('Set as system dark theme'),
+                  tooltip: t('Set as default dark theme'),
                   placement: 'bottom',
                   icon: 'MoonOutlined',
                   onClick: () => handleSetSystemDark(original),
@@ -482,7 +497,7 @@ function ThemesList({
             canSetSystemThemes && original.is_system_dark
               ? {
                   label: 'unset-dark-action',
-                  tooltip: t('Remove as system dark theme'),
+                  tooltip: t('Clear default dark theme'),
                   placement: 'bottom',
                   icon: 'StopOutlined',
                   onClick: () => handleUnsetSystemDark(),
@@ -520,11 +535,12 @@ function ThemesList({
       canDelete,
       canApply,
       canExport,
-      getCurrentCrudThemeId,
+      hasDevOverride,
       appliedThemeId,
       canSetSystemThemes,
       addDangerToast,
       handleThemeApply,
+      handleBulkThemeExport,
       handleSetSystemDefault,
       handleUnsetSystemDefault,
       handleSetSystemDark,

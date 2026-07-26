@@ -179,11 +179,13 @@ describe('SavedQuery', () => {
     });
 
     await waitFor(() => {
-      const saveBtn = screen.getByRole('button', { name: /save/i });
-      const caretBtn = screen.getByRole('button', { name: /down/i });
+      const saveBtn = screen.getByRole('button', { name: 'Save' });
+      const saveDataSetBtn = screen.getByRole('button', {
+        name: /save dataset/i,
+      });
 
       expect(saveBtn).toBeVisible();
-      expect(caretBtn).toBeVisible();
+      expect(saveDataSetBtn).toBeVisible();
     });
   });
 
@@ -193,12 +195,7 @@ describe('SavedQuery', () => {
       store: mockStore(mockState),
     });
 
-    const caretBtn = await screen.findByRole('button', {
-      name: /down/i,
-    });
-    userEvent.click(caretBtn);
-
-    const saveDatasetMenuItem = await screen.findByText(/save dataset/i);
+    const saveDatasetMenuItem = await screen.findByLabelText(/save dataset/i);
     userEvent.click(saveDatasetMenuItem);
 
     const saveDatasetHeader = screen.getByText(/save or overwrite dataset/i);
@@ -211,13 +208,7 @@ describe('SavedQuery', () => {
       useRedux: true,
       store: mockStore(mockState),
     });
-
-    const caretBtn = await screen.findByRole('button', {
-      name: /down/i,
-    });
-    userEvent.click(caretBtn);
-
-    const saveDatasetMenuItem = await screen.findByText(/save dataset/i);
+    const saveDatasetMenuItem = await screen.findByLabelText(/save dataset/i);
     userEvent.click(saveDatasetMenuItem);
 
     const closeBtn = screen.getByRole('button', { name: /close/i });
@@ -345,5 +336,33 @@ describe('SavedQuery', () => {
         screen.queryByRole('heading', { name: /save query/i }),
       ).not.toBeInTheDocument();
     });
+  });
+
+  test('disables the save button when the query name is empty or whitespace-only', async () => {
+    render(<SaveQuery {...mockedProps} />, {
+      useRedux: true,
+      store: mockStore(mockState),
+    });
+
+    userEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    const nameInput = screen.getAllByRole('textbox')[0] as HTMLInputElement;
+    const modalSaveBtn = () =>
+      screen.getAllByRole('button', { name: /save/i })[1];
+
+    // Default label is present, so the save button starts enabled
+    expect(modalSaveBtn()).toBeEnabled();
+
+    // Clearing the name disables the save button
+    userEvent.clear(nameInput);
+    await waitFor(() => expect(modalSaveBtn()).toBeDisabled());
+
+    // A whitespace-only name keeps the save button disabled
+    userEvent.type(nameInput, '   ');
+    await waitFor(() => expect(modalSaveBtn()).toBeDisabled());
+
+    // A non-empty name re-enables the save button
+    userEvent.type(nameInput, 'My query');
+    await waitFor(() => expect(modalSaveBtn()).toBeEnabled());
   });
 });

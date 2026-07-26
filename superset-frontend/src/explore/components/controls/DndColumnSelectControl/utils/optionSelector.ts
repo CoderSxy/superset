@@ -17,12 +17,12 @@
  * under the License.
  */
 import { ColumnMeta, isColumnMeta } from '@superset-ui/chart-controls';
+import { t } from '@apache-superset/core/translation';
 import {
   AdhocColumn,
   ensureIsArray,
   QueryFormColumn,
   isPhysicalColumn,
-  t,
 } from '@superset-ui/core';
 
 const getColumnNameOrAdhocColumn = (
@@ -87,6 +87,30 @@ export class OptionSelector {
 
   swap(a: number, b: number) {
     [this.values[a], this.values[b]] = [this.values[b], this.values[a]];
+  }
+
+  /**
+   * Moves a value from one index to another, mutating `values` in place.
+   * No-ops on identical or out-of-range indices.
+   *
+   * @param from - original index
+   * @param to - destination index
+   */
+  reorder(from: number, to: number) {
+    // Guard against no-op and out-of-range indices. A fast drag can resolve to
+    // stale/identical endpoints; without this an out-of-range `from` splices
+    // `undefined` into the values and corrupts everything downstream.
+    if (
+      from === to ||
+      from < 0 ||
+      to < 0 ||
+      from >= this.values.length ||
+      to >= this.values.length
+    ) {
+      return;
+    }
+    const [moved] = this.values.splice(from, 1);
+    this.values.splice(to, 0, moved);
   }
 
   has(value: QueryFormColumn): boolean {

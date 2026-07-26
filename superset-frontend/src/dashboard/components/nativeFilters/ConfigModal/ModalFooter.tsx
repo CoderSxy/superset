@@ -20,11 +20,12 @@ import { FC, ReactNode } from 'react';
 import {
   Button,
   type OnClickHandler,
-  Alert,
   Icons,
   Flex,
 } from '@superset-ui/core/components';
-import { t, useTheme, styled, css } from '@superset-ui/core';
+import { t } from '@apache-superset/core/translation';
+import { Alert } from '@apache-superset/core/components';
+import { styled, css, useTheme } from '@apache-superset/core/theme';
 import { BaseExpandButtonWrapper } from './SharedStyles';
 
 const StyledAlert = styled(Alert)`

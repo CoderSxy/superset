@@ -16,21 +16,34 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useState, useEffect, FC, PureComponent, useMemo } from 'react';
+import {
+  useState,
+  useEffect,
+  FC,
+  useMemo,
+  ReactNode,
+  Component,
+  ErrorInfo,
+} from 'react';
 import rison from 'rison';
 import { useSelector } from 'react-redux';
 import { Link } from 'react-router-dom';
 import { useQueryParams, BooleanParam } from 'use-query-params';
-import { isEmpty } from 'lodash';
+import { isEmpty } from 'lodash-es';
+import { t } from '@apache-superset/core/translation';
 import {
-  t,
+  SupersetClient,
+  getExtensionsRegistry,
+  isFeatureEnabled,
+  FeatureFlag,
+  CACHE_KEY,
+} from '@superset-ui/core';
+import {
   styled,
   css,
   SupersetTheme,
-  SupersetClient,
-  getExtensionsRegistry,
   useTheme,
-} from '@superset-ui/core';
+} from '@apache-superset/core/theme';
 import {
   Tag,
   Tooltip,
@@ -40,7 +53,8 @@ import {
   TelemetryPixel,
 } from '@superset-ui/core/components';
 import type { ItemType, MenuItem } from '@superset-ui/core/components/Menu';
-import { ensureAppRoot } from 'src/utils/pathUtils';
+import { ensureAppRoot, stripAppRoot } from 'src/utils/navigationUtils';
+import { isEmbedded } from 'src/dashboard/util/isEmbedded';
 import { findPermission } from 'src/utils/findPermission';
 import { isUserAdmin } from 'src/dashboard/util/permissionUtils';
 import {
@@ -60,6 +74,7 @@ import {
   GlobalMenuDataOptions,
   RightMenuProps,
 } from './types';
+import { NAVBAR_MENU_POPUP_OFFSET } from './commonMenuData';
 
 const extensionsRegistry = getExtensionsRegistry();
 
@@ -69,7 +84,6 @@ const StyledDiv = styled.div<{ align: string }>`
   flex-direction: row;
   justify-content: ${({ align }) => align};
   align-items: center;
-  margin-right: ${({ theme }) => theme.sizeUnit}px;
 `;
 
 const StyledMenuItemWithIcon = styled.div`
@@ -128,6 +142,7 @@ const RightMenu = ({
     EXCEL_EXTENSIONS,
     ALLOWED_EXTENSIONS,
     HAS_GSHEETS_INSTALLED,
+    SCARF_ANALYTICS,
   } = useSelector<any, ExtensionConfigs>(state => state.common.conf);
   const [showDatabaseModal, setShowDatabaseModal] = useState<boolean>(false);
   const [showCSVUploadModal, setShowCSVUploadModal] = useState<boolean>(false);
@@ -208,6 +223,9 @@ const RightMenu = ({
     },
     {
       label: t('SQL query'),
+      // Keep the URL relative so isFrontendRoute() matches and Link navigates
+      // via React Router; the <Typography.Link> fallback applies ensureAppRoot
+      // exactly once for non-frontend routes.
       url: '/sqllab?new=true',
       icon: <Icons.SearchOutlined data-test={`menu-item-${t('SQL query')}`} />,
       perm: 'can_sqllab',
@@ -224,7 +242,7 @@ const RightMenu = ({
     },
     {
       label: t('Dashboard'),
-      url: '/dashboard/new',
+      url: '/dashboard/new/',
       icon: (
         <Icons.DashboardOutlined data-test={`menu-item-${t('Dashboard')}`} />
       ),
@@ -342,7 +360,20 @@ const RightMenu = ({
   const handleDatabaseAdd = () => setQuery({ databaseAdded: true });
 
   const handleLogout = () => {
-    localStorage.removeItem('redux');
+    try {
+      window.localStorage.removeItem('redux');
+      window.sessionStorage.removeItem('login_attempted');
+      // Purge the namespaced Cache API store so cached GET responses are not
+      // retained on the device after the session ends. Best-effort: the
+      // returned promise is not awaited since logout navigates away.
+      if (typeof caches !== 'undefined') {
+        caches.delete(CACHE_KEY).catch(() => {
+          /* best-effort: ignore cache deletion failures */
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to clear storage on logout:', error);
+    }
   };
 
   // Use the theme menu hook
@@ -387,6 +418,7 @@ const RightMenu = ({
               label: menu.label,
               icon: menu.icon,
               children: childItems,
+              popupOffset: NAVBAR_MENU_POPUP_OFFSET,
             });
           } else if (menu.url) {
             if (
@@ -395,14 +427,13 @@ const RightMenu = ({
               items.push({
                 key: menu.label,
                 label: isFrontendRoute(menu.url) ? (
-                  <Link to={menu.url || ''}>
-                    {menu.icon} {menu.label}
-                  </Link>
+                  <Link to={stripAppRoot(menu.url || '')}>{menu.label}</Link>
                 ) : (
                   <Typography.Link href={ensureAppRoot(menu.url || '')}>
-                    {menu.icon} {menu.label}
+                    {menu.label}
                   </Typography.Link>
                 ),
+                icon: menu.icon,
               });
             }
           }
@@ -412,14 +443,13 @@ const RightMenu = ({
           items.push({
             key: menu.label,
             label: isFrontendRoute(menu.url) ? (
-              <Link to={menu.url || ''}>
-                {menu.icon} {menu.label}
-              </Link>
+              <Link to={stripAppRoot(menu.url || '')}>{menu.label}</Link>
             ) : (
               <Typography.Link href={ensureAppRoot(menu.url || '')}>
-                {menu.icon} {menu.label}
+                {menu.label}
               </Typography.Link>
             ),
+            icon: menu.icon,
           });
         }
       });
@@ -448,7 +478,9 @@ const RightMenu = ({
             sectionItems.push({
               key: child.label,
               label: isFrontendRoute(child.url) ? (
-                <Link to={child.url || ''}>{menuItemDisplay}</Link>
+                <Link to={stripAppRoot(child.url || '')}>
+                  {menuItemDisplay}
+                </Link>
               ) : (
                 <Typography.Link
                   href={child.url || ''}
@@ -485,21 +517,28 @@ const RightMenu = ({
           userItems.push({
             key: 'info',
             label: (
-              <Typography.Link href={navbarRight.user_info_url}>
+              <Typography.Link href={ensureAppRoot(navbarRight.user_info_url)}>
                 {t('Info')}
               </Typography.Link>
             ),
           });
         }
-        userItems.push({
-          key: 'logout',
-          label: (
-            <Typography.Link href={navbarRight.user_logout_url}>
-              {t('Logout')}
-            </Typography.Link>
-          ),
-          onClick: handleLogout,
-        });
+        const showLogout =
+          !isEmbedded() ||
+          !isFeatureEnabled(FeatureFlag.DisableEmbeddedSupersetLogout);
+        if (showLogout) {
+          userItems.push({
+            key: 'logout',
+            label: (
+              <Typography.Link
+                href={ensureAppRoot(navbarRight.user_logout_url)}
+              >
+                {t('Logout')}
+              </Typography.Link>
+            ),
+            onClick: handleLogout,
+          });
+        }
 
         items.push({
           type: 'group',
@@ -522,11 +561,11 @@ const RightMenu = ({
               style: { height: 'auto', minHeight: 'auto' },
               label: (
                 <div
-                  css={(theme: SupersetTheme) => css`
-                    font-size: ${theme.fontSizeSM}px;
-                    color: ${theme.colorTextSecondary || theme.colorText};
+                  css={(themeArg: SupersetTheme) => css`
+                    font-size: ${themeArg.fontSizeSM}px;
+                    color: ${themeArg.colorTextSecondary || themeArg.colorText};
                     white-space: pre-wrap;
-                    padding: ${theme.sizeUnit}px ${theme.sizeUnit * 2}px;
+                    padding: ${themeArg.sizeUnit}px ${themeArg.sizeUnit * 2}px;
                   `}
                 >
                   {[
@@ -565,9 +604,9 @@ const RightMenu = ({
         key: 'new-dropdown',
         label: <Icons.PlusOutlined data-test="new-dropdown-icon" />,
         className: 'submenu-with-caret',
-        icon: <Icons.CaretDownOutlined iconSize="xs" />,
+        icon: <Icons.DownOutlined iconSize="xs" />,
         children: buildNewDropdownItems(),
-        ...{ 'data-test': 'new-dropdown' },
+        popupOffset: NAVBAR_MENU_POPUP_OFFSET,
       });
     }
 
@@ -582,9 +621,10 @@ const RightMenu = ({
     items.push({
       key: 'settings',
       label: t('Settings'),
-      icon: <Icons.CaretDownOutlined iconSize="xs" />,
+      icon: <Icons.DownOutlined iconSize="xs" />,
       children: buildSettingsMenuItems(),
       className: 'submenu-with-caret',
+      popupOffset: NAVBAR_MENU_POPUP_OFFSET,
     });
 
     return items;
@@ -669,6 +709,8 @@ const RightMenu = ({
           display: flex;
           flex-direction: row;
           align-items: center;
+          height: 100%;
+          border-bottom: none !important;
 
           /* Remove the underline from menu items */
           .ant-menu-item:after,
@@ -677,14 +719,23 @@ const RightMenu = ({
           }
 
           .submenu-with-caret {
-            padding: 0 ${theme.sizeUnit}px;
+            height: 100%;
+            padding: 0;
             .ant-menu-submenu-title {
+              align-items: center;
               display: flex;
               gap: ${theme.sizeUnit * 2}px;
               flex-direction: row-reverse;
+              height: 100%;
             }
             &.ant-menu-submenu::after {
               inset-inline: ${theme.sizeUnit}px;
+            }
+            &.ant-menu-submenu:hover,
+            &.ant-menu-submenu-active {
+              .ant-menu-title-content {
+                color: ${theme.colorPrimary};
+              }
             }
           }
         `}
@@ -736,8 +787,12 @@ const RightMenu = ({
       )}
       <TelemetryPixel
         version={navbarRight.version_string}
-        sha={navbarRight.version_sha}
-        build={navbarRight.build_number}
+        // Build details may be redacted to empty/null for non-admins; fall back
+        // to the component's "unknown" defaults instead of emitting empty path
+        // segments in the Scarf pixel URL.
+        sha={navbarRight.version_sha || undefined}
+        build={navbarRight.build_number || undefined}
+        enabled={SCARF_ANALYTICS !== false}
       />
     </StyledDiv>
   );
@@ -757,23 +812,39 @@ const RightMenuWithQueryWrapper: FC<RightMenuProps> = props => {
 // Superset still has multiple entry points, and not all of them have
 // the same setup, and critically, not all of them have the QueryParamProvider.
 // This wrapper ensures the RightMenu renders regardless of the provider being present.
-class RightMenuErrorWrapper extends PureComponent<RightMenuProps> {
-  state = {
-    hasError: false,
-  };
+// Note: Error boundaries require class components in React - there is no hooks equivalent
+// for getDerivedStateFromError and componentDidCatch.
+interface RightMenuErrorWrapperState {
+  hasError: boolean;
+}
 
-  static getDerivedStateFromError() {
+// eslint-disable-next-line react-prefer-function-component/react-prefer-function-component -- componentDidCatch requires class component
+class RightMenuErrorWrapper extends Component<
+  RightMenuProps & { children?: ReactNode },
+  RightMenuErrorWrapperState
+> {
+  constructor(props: RightMenuProps & { children?: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): RightMenuErrorWrapperState {
     return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
+    console.error('RightMenu error caught:', error, errorInfo);
   }
 
   noop = () => {};
 
   render() {
+    const { children, ...rightMenuProps } = this.props;
     if (this.state.hasError) {
-      return <RightMenu setQuery={this.noop} {...this.props} />;
+      return <RightMenu setQuery={this.noop} {...rightMenuProps} />;
     }
 
-    return this.props.children;
+    return children;
   }
 }
 

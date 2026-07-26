@@ -18,6 +18,7 @@
  */
 /* eslint camelcase: 0 */
 import {
+  cloneElement,
   isValidElement,
   ReactNode,
   useCallback,
@@ -27,23 +28,26 @@ import {
   useRef,
   useState,
 } from 'react';
+import { t } from '@apache-superset/core/translation';
 import {
   ensureIsArray,
-  t,
-  styled,
   getChartControlPanelRegistry,
   QueryFormData,
   DatasourceType,
-  css,
-  SupersetTheme,
-  useTheme,
   isDefined,
   JsonValue,
   NO_TIME_RANGE,
   usePrevious,
   isFeatureEnabled,
   FeatureFlag,
+  VizType,
 } from '@superset-ui/core';
+import {
+  styled,
+  css,
+  SupersetTheme,
+  useTheme,
+} from '@apache-superset/core/theme';
 import {
   ControlPanelSectionConfig,
   ControlState,
@@ -55,7 +59,7 @@ import {
   sections,
 } from '@superset-ui/chart-controls';
 import { useSelector } from 'react-redux';
-import { kebabCase, isEqual } from 'lodash';
+import { kebabCase, isEqual } from 'lodash-es';
 
 import {
   Collapse,
@@ -85,9 +89,19 @@ const TABS_KEYS = {
   MATRIXIFY: 'MATRIXIFY',
 };
 
+// Table charts don't support matrixify feature
+const MATRIXIFY_INCOMPATIBLE_CHARTS = new Set([
+  VizType.Table,
+  VizType.TableAgGrid,
+  VizType.PivotTable,
+  VizType.TimeTable,
+  VizType.TimePivot,
+]);
+
 export type ControlPanelsContainerProps = {
   exploreState: ExplorePageState['explore'];
-  actions: ExploreActions;
+  // Only setControlValue is used from actions in this component
+  actions: Pick<ExploreActions, 'setControlValue'>;
   datasource_type: DatasourceType;
   chart: ChartState;
   controls: Record<string, ControlState>;
@@ -292,6 +306,7 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
   const prevChartStatus = usePrevious(props.chart.chartStatus);
 
   const [showDatasourceAlert, setShowDatasourceAlert] = useState(false);
+  const [activeTabKey, setActiveTabKey] = useState<string>(TABS_KEYS.DATA);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -578,7 +593,7 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
   const renderControlPanelSection = (
     section: ExpandedControlPanelSectionConfig,
   ) => {
-    const { controls } = props;
+    const { controls, chart, exploreState, form_data, actions } = props;
     const { label, description, visibility } = section;
 
     // Section label can be a ReactNode but in some places we want to
@@ -615,10 +630,17 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
             line-height: 1.3;
           `}
         >
-          {label}
+          {typeof label === 'function' ? (label as () => ReactNode)() : label}
         </span>{' '}
         {description && (
-          <Tooltip id={sectionId} title={description}>
+          <Tooltip
+            id={sectionId}
+            title={
+              typeof description === 'function'
+                ? (description as () => ReactNode)()
+                : description
+            }
+          >
             <Icons.InfoCircleOutlined css={iconStyles} />
           </Tooltip>
         )}
@@ -627,12 +649,13 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
             id={`${kebabCase('validation-errors')}-tooltip`}
             title={t('This section contains validation errors')}
           >
-            <Icons.InfoCircleOutlined iconColor={theme.colorErrorText} />
+            <Icons.ExclamationCircleOutlined iconColor={theme.colorError} />
           </Tooltip>
         )}
       </span>
     );
 
+    let isInSubSection = false;
     const PanelChildren = (
       <>
         <StashFormDataContainer
@@ -650,8 +673,19 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
             .filter(Boolean)}
         />
         {isVisible && (
-          <>
+          <div style={{ paddingLeft: theme.sizeUnit * 2 }}>
             {section.controlSetRows.map((controlSets, i) => {
+              // Detect sub-section header rows (React elements with no name prop)
+              const isSubSectionHeaderRow = controlSets.some(
+                item =>
+                  isValidElement(item) &&
+                  !(item as React.ReactElement<Record<string, unknown>>).props
+                    ?.name,
+              );
+              if (isSubSectionHeaderRow) {
+                isInSubSection = true;
+              }
+
               const renderedControls = controlSets
                 .map(controlItem => {
                   if (!controlItem) {
@@ -660,7 +694,32 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
                   }
                   if (isValidElement(controlItem)) {
                     // When the item is a React element
-                    return controlItem;
+                    const element = controlItem as React.ReactElement<
+                      Record<string, unknown>
+                    >;
+
+                    const controlName = (element.props as { name: string })
+                      .name;
+                    if (!controlName) {
+                      return element;
+                    }
+                    const controlState = controls[controlName];
+
+                    return cloneElement(element, {
+                      ...(element.props as Record<string, unknown>),
+                      actions,
+                      controls,
+                      chart,
+                      exploreState,
+                      form_data,
+                      ...(controlState && {
+                        value: controlState.value,
+                        validationErrors: controlState.validationErrors,
+                        default: controlState.default,
+                        onChange: (value: unknown, errors: unknown[]) =>
+                          setControlValue(controlName, value, errors),
+                      }),
+                    });
                   }
                   if (
                     isCustomControlItem(controlItem) &&
@@ -675,14 +734,23 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
               if (renderedControls.length === 0) {
                 return null;
               }
-              return (
+              // Indent controls within sub-sections for visual hierarchy
+              const paddingLeft =
+                isInSubSection && !isSubSectionHeaderRow
+                  ? theme.sizeUnit * 3
+                  : 0;
+              return paddingLeft ? (
+                <div key={`controlsetrow-${i}`} style={{ paddingLeft }}>
+                  <ControlRow controls={renderedControls} />
+                </div>
+              ) : (
                 <ControlRow
                   key={`controlsetrow-${i}`}
                   controls={renderedControls}
                 />
               );
             })}
-          </>
+          </div>
         )}
       </>
     );
@@ -692,7 +760,7 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
       label: <PanelHeader />,
       children: PanelChildren,
       className: section.label ? '' : 'hidden-collapse-header',
-      style: { visibility: isVisible ? 'visible' : 'hidden' },
+      style: { display: isVisible ? 'block' : 'none' },
     };
   };
 
@@ -752,9 +820,9 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
               placement="right"
               title={props.errorMessage}
             >
-              <Icons.InfoCircleOutlined
+              <Icons.ExclamationCircleOutlined
                 data-test="query-error-tooltip-trigger"
-                iconColor={theme.colorErrorText}
+                iconColor={theme.colorError}
                 iconSize="s"
               />
             </Tooltip>
@@ -770,7 +838,24 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
   ]);
 
   const showCustomizeTab = customizeSections.length > 0;
-  const showMatrixifyTab = isFeatureEnabled(FeatureFlag.Matrixify);
+  const showMatrixifyTab =
+    isFeatureEnabled(FeatureFlag.Matrixify) &&
+    !MATRIXIFY_INCOMPATIBLE_CHARTS.has(form_data.viz_type as VizType);
+
+  // Check if matrixify is enabled in form_data
+  const matrixifyIsEnabled =
+    form_data.matrixify_enable === true &&
+    ((form_data.matrixify_mode_rows !== undefined &&
+      form_data.matrixify_mode_rows !== 'disabled') ||
+      (form_data.matrixify_mode_columns !== undefined &&
+        form_data.matrixify_mode_columns !== 'disabled'));
+
+  // Auto-switch to Matrixify tab when it's enabled
+  useEffect(() => {
+    if (showMatrixifyTab && matrixifyIsEnabled) {
+      setActiveTabKey(TABS_KEYS.MATRIXIFY);
+    }
+  }, [showMatrixifyTab, matrixifyIsEnabled]);
 
   // Check if matrixify sections have validation errors
   const matrixifyHasErrors = useMemo(() => {
@@ -813,9 +898,9 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
               placement="right"
               title={t('This section contains validation errors')}
             >
-              <Icons.InfoCircleOutlined
+              <Icons.ExclamationCircleOutlined
                 data-test="matrixify-validation-error-tooltip-trigger"
-                iconColor={theme.colorErrorText}
+                iconColor={theme.colorError}
                 iconSize="s"
               />
             </Tooltip>
@@ -859,6 +944,8 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
           id="controlSections"
           data-test="control-tabs"
           allowOverflow={false}
+          activeKey={activeTabKey}
+          onChange={(key: string) => setActiveTabKey(key)}
           items={[
             {
               key: TABS_KEYS.DATA,
@@ -871,7 +958,7 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
                     expandIconPosition="end"
                     ghost
                     bordered
-                    items={[...querySections.map(renderControlPanelSection)]}
+                    items={querySections.map(renderControlPanelSection)}
                   />
                 </>
               ),
@@ -887,9 +974,7 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
                         expandIconPosition="end"
                         ghost
                         bordered
-                        items={[
-                          ...customizeSections.map(renderControlPanelSection),
-                        ]}
+                        items={customizeSections.map(renderControlPanelSection)}
                       />
                     ),
                   },
@@ -935,12 +1020,12 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
                           )}
                         <Collapse
                           defaultActiveKey={expandedMatrixifySections}
-                          expandIconPosition="right"
+                          expandIconPosition="end"
                           ghost
                           bordered
-                          items={[
-                            ...matrixifySections.map(renderControlPanelSection),
-                          ]}
+                          items={matrixifySections.map(
+                            renderControlPanelSection,
+                          )}
                         />
                       </>
                     ),
